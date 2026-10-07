@@ -90,6 +90,51 @@ class NBFFLoss(LossFunc):
         return loss.mean()
 
 
+class StackLoss(LossFunc):
+    def __init__(self, transition_blind=4):
+        """Initialize the loss function
+        Args:
+            transition_blind (int): The number of steps to
+            ignore after each change in the target"""
+
+        self.transition_blind = transition_blind
+
+    def __call__(self, loss_dict):
+        pred = loss_dict["controlled"]
+        target = loss_dict["targets"]
+        trial_end = loss_dict["extra"][:, 1]
+        n_time = target.shape[1]
+
+        # Step 1: Find the bins where any output changes value
+        # Adding a column of zeros at the beginning because diff reduces the size by 1
+        transitions = (torch.diff(target, dim=1) != 0).any(dim=2)
+        transitions = torch.cat(
+            (torch.zeros_like(transitions[:, :1]), transitions), dim=1
+        )
+
+        # Step 2: Ignore the bin of each change and the bins after it,
+        # 'transition_blind' bins in total
+        mask = torch.ones_like(transitions, dtype=torch.float)
+        for i in range(self.transition_blind):
+            shifted_transitions = torch.cat(
+                (torch.zeros_like(transitions[:, :i]), transitions[:, : n_time - i]),
+                dim=1,
+            )
+            mask = mask * (1 - shifted_transitions.float())
+
+        # Step 3: Ignore the first 5 bins
+        mask[:, 0:5] = 0.0
+
+        # Step 4: Ignore the padding after the end of each trial
+        time = torch.arange(n_time, device=target.device)
+        mask = mask * (time.unsqueeze(0) < trial_end.unsqueeze(1)).float()
+
+        # Average over the bins that are kept, not the full padded trial
+        mask = mask.unsqueeze(2).expand_as(target)
+        loss = nn.MSELoss(reduction="none")(pred, target) * mask
+        return loss.sum() / mask.sum().clamp_min(1)
+
+
 class MatchTargetLossMSE(LossFunc):
     def __init__(self):
         pass
