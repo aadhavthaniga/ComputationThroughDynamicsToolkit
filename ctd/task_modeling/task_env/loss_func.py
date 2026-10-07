@@ -53,6 +53,85 @@ class RandomTargetLoss(LossFunc):
         return pos_loss + act_loss
 
 
+class ActorLoss(RandomTargetLoss):
+    def __init__(
+        self,
+        position_loss,
+        pos_weight,
+        act_weight,
+        full_trial_epoch: int = 200,
+        reach_radius: float = 0.02,
+        hold_ms: float = 100,
+        trigger_ms: float = 40,
+        trigger_weight: float = 1.0,
+        dt: float = 0.01,
+        n_muscles: int = 6,
+    ):
+        """Initialize the loss function
+        Args:
+            position_loss (nn.Module): The loss function to use for the position
+            pos_weight (float): The weight to apply to the position loss
+            act_weight (float): The weight to apply to the muscle effort loss
+            full_trial_epoch (int): The number of epochs
+            before the full trial is included in the position loss
+            reach_radius (float): Distance to the goal (m) that counts as arrived
+            hold_ms (float): How long the hand must stay arrived before Trigger
+            trigger_ms (float): Length of the Trigger pulse
+            trigger_weight (float): The weight to apply to the Trigger loss
+            dt (float): Timestep in seconds
+            n_muscles (int): Number of muscle outputs; Trigger is the next output"""
+        super().__init__(position_loss, pos_weight, act_weight, full_trial_epoch)
+        self.reach_radius = reach_radius
+        self.hold_steps = int(round(hold_ms / 1000 / dt))
+        self.trigger_steps = int(round(trigger_ms / 1000 / dt))
+        self.trigger_weight = trigger_weight
+        self.n_muscles = n_muscles
+
+    def trigger_label(self, fingertip, target, valid_on):
+        """Compute the correct Trigger trace from the path the hand actually took
+
+        The pulse starts once the hand has stayed within reach_radius of the goal
+        for hold_steps, counting only timesteps from valid_on onward. At most one
+        pulse per trial, and none on catch trials (valid_on = -1).
+        """
+        with torch.no_grad():
+            n_trials, n_time, _ = fingertip.shape
+            step = torch.arange(n_time, device=fingertip.device)
+            at_goal = torch.linalg.norm(fingertip - target, dim=-1) < self.reach_radius
+            at_goal &= (valid_on[:, None] >= 0) & (step[None, :] >= valid_on[:, None])
+            # held[b, t]: at the goal for hold_steps in a row, starting at t
+            held = at_goal.int().unfold(1, self.hold_steps, 1).min(dim=-1).values > 0
+            label = torch.zeros(n_trials, n_time, device=fingertip.device)
+            for trial in torch.nonzero(held.any(dim=1)).flatten():
+                start = held[trial].int().argmax() + self.hold_steps
+                label[trial, start : start + self.trigger_steps] = 1.0
+        return label
+
+    def __call__(self, loss_dict):
+        pred = loss_dict["controlled"]
+        target = loss_dict["targets"]
+        act = loss_dict["actions"]
+        epoch = loss_dict["epoch"]
+        valid_on = loss_dict["extra"][:, 0]
+        n_time = pred.shape[1]
+        # Same curriculum as RandomTargetLoss, except that an empty window
+        # (epoch 0) contributes nothing instead of NaN
+        include_loss = int(np.ceil(n_time * min(1.0, epoch / self.full_trial_epoch)))
+        pos_loss = 0.0
+        if include_loss > 0:
+            pos_loss = self.pos_weight * self.position_loss(
+                pred[:, :include_loss, :], target[:, :include_loss, :]
+            )
+        muscles = act[..., : self.n_muscles]
+        trigger = act[..., self.n_muscles]
+        act_loss = self.act_weight * self.action_loss(
+            muscles, torch.zeros_like(muscles)
+        )
+        label = self.trigger_label(pred, target, valid_on)
+        trigger_loss = self.trigger_weight * self.action_loss(trigger, label)
+        return pos_loss + act_loss + trigger_loss
+
+
 class NBFFLoss(LossFunc):
     def __init__(self, transition_blind):
         """Initialize the loss function
