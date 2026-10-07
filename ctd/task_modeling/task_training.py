@@ -216,7 +216,8 @@ def train(
         config_all["trainer"],
         logger=logger,
         callbacks=callbacks,
-        accelerator="auto",
+        # The MotorNet arm does not fully move to MPS, so coupled envs run on CPU
+        accelerator="cpu" if task_env.coupled_env else "auto",
         _convert_="all",
     )
 
