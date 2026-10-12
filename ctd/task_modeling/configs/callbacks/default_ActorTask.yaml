@@ -9,6 +9,9 @@ tune_report_callback:
   metrics:
     loss: valid/loss
 
+loss_terms:
+  _target_: ctd.task_modeling.callbacks.callbacks_actor.ActorLossTermsLogger
+
 video_generation_arm:
   _target_: ctd.task_modeling.callbacks.callbacks_coupled.MotorNetVideoGenerationArm
   log_every_n_epochs: 50

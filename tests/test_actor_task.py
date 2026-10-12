@@ -12,6 +12,7 @@ import torch
 from omegaconf import OmegaConf
 
 import ctd
+from ctd.task_modeling.callbacks.callbacks_actor import ActorLossTermsLogger
 from ctd.task_modeling.model.rnn import GRU_RNN
 from ctd.task_modeling.task_env.loss_func import ActorLoss
 from ctd.task_modeling.task_wrapper.task_wrapper import TaskTrainedWrapper
@@ -122,3 +123,71 @@ def test_loss_is_finite_for_untrained_gru_rollout(env):
     wrapper.loss_func({**loss_dict, "epoch": 0}).backward()
     grads = [p.grad for p in model.parameters() if p.grad is not None]
     assert grads and all(torch.isfinite(g).all() for g in grads)
+
+
+@pytest.fixture(scope="module")
+def trigger_losses(env):
+    """Trigger loss of four Trigger outputs against a pulse label at bins 110-113"""
+    label = torch.zeros(1, N_TIME)
+    label[0, 110:114] = 1.0
+    shifted = torch.zeros(1, N_TIME)
+    shifted[0, 112:116] = 1.0
+    outputs = {
+        "correct": label.clone(),
+        "shifted": shifted,
+        "never": torch.zeros(1, N_TIME),
+        "always": torch.ones(1, N_TIME),
+    }
+    return {k: env.loss_func.trigger_loss(v, label).item() for k, v in outputs.items()}
+
+
+def test_correct_pulse_beats_never_firing(trigger_losses):
+    assert trigger_losses["correct"] < trigger_losses["never"]
+
+
+def test_pulse_shifted_by_two_bins_beats_never_firing(trigger_losses):
+    assert trigger_losses["shifted"] < trigger_losses["never"]
+
+
+def test_firing_on_every_bin_is_worse_than_correct_pulse(trigger_losses):
+    assert trigger_losses["always"] > trigger_losses["correct"]
+
+
+def test_default_pos_weight_balances_pulse_and_other_bins(env, trigger_losses):
+    # Missing the 4 pulse bins costs as much as firing on the other 296
+    assert env.loss_func.trigger_pos_weight == 74.0
+    assert trigger_losses["never"] == pytest.approx(trigger_losses["always"])
+
+
+def test_pos_weight_of_one_is_plain_mse():
+    loss = ActorLoss(torch.nn.MSELoss(), 1.0, 1.0, trigger_pos_weight=1.0)
+    trigger, label = torch.rand(3, N_TIME), torch.zeros(3, N_TIME)
+    label[:, 110:114] = 1.0
+    expected = torch.nn.MSELoss()(trigger, label)
+    assert loss.trigger_loss(trigger, label).item() == pytest.approx(expected.item())
+
+
+def test_loss_terms_logger_logs_the_three_parts(env):
+    class FakeModule:
+        def __init__(self, loss_func):
+            self.loss_func = loss_func
+            self.logged = {}
+
+        def log(self, name, value):
+            self.logged[name] = value
+
+    fingertip, target = make_trial(env, VALID_ON, np.r_[ARRIVAL:N_TIME])
+    total = env.loss_func(
+        {
+            "controlled": fingertip[None],
+            "targets": target[None],
+            "actions": torch.full((1, N_TIME, 7), 0.1),
+            "extra": torch.tensor([[float(VALID_ON), float(N_TIME)]]),
+            "epoch": 200,
+        }
+    )
+    module = FakeModule(env.loss_func)
+    ActorLossTermsLogger().on_train_batch_end(None, module, None, None, 0)
+    names = ["train/position_loss", "train/effort_loss", "train/trigger_loss"]
+    assert sorted(module.logged) == sorted(names)
+    assert sum(module.logged.values()).item() == pytest.approx(total.item())

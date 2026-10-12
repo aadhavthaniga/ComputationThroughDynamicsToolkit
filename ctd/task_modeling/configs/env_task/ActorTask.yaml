@@ -20,4 +20,5 @@ reach_radius: 0.02  # m
 hold_ms: 100
 trigger_ms: 40
 trigger_weight: 1.0
+trigger_pos_weight: 74.0  # weight of the label-1 bins: (300 - 4) / 4
 full_trial_epoch: 200

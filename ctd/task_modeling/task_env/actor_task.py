@@ -31,6 +31,7 @@ class ActorTask(RandomTarget):
         hold_ms: How long the hand must stay arrived before Trigger.
         trigger_ms: Length of the Trigger pulse.
         trigger_weight: Weight of the Trigger loss.
+        trigger_pos_weight: Weight of the bins where the Trigger label is 1.
         full_trial_epoch: Epochs before the full trial is in the position loss.
         *args, **kwargs: Passed as-is to :class:`RandomTarget`.
     """
@@ -47,6 +48,7 @@ class ActorTask(RandomTarget):
         hold_ms=100,
         trigger_ms=40,
         trigger_weight=1.0,
+        trigger_pos_weight=74.0,
         full_trial_epoch=200,
         **kwargs,
     ):
@@ -85,6 +87,7 @@ class ActorTask(RandomTarget):
             hold_ms=hold_ms,
             trigger_ms=trigger_ms,
             trigger_weight=trigger_weight,
+            trigger_pos_weight=trigger_pos_weight,
             dt=self.dt,
             n_muscles=self.n_muscles,
         )

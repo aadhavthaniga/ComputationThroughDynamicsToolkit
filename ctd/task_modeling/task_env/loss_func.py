@@ -64,6 +64,7 @@ class ActorLoss(RandomTargetLoss):
         hold_ms: float = 100,
         trigger_ms: float = 40,
         trigger_weight: float = 1.0,
+        trigger_pos_weight: float = 74.0,
         dt: float = 0.01,
         n_muscles: int = 6,
     ):
@@ -78,6 +79,9 @@ class ActorLoss(RandomTargetLoss):
             hold_ms (float): How long the hand must stay arrived before Trigger
             trigger_ms (float): Length of the Trigger pulse
             trigger_weight (float): The weight to apply to the Trigger loss
+            trigger_pos_weight (float): Weight of the bins where the Trigger
+            label is 1; all other bins have weight 1. The default makes the 4
+            pulse bins count as much in total as the other 296 bins of a 3 s trial
             dt (float): Timestep in seconds
             n_muscles (int): Number of muscle outputs; Trigger is the next output"""
         super().__init__(position_loss, pos_weight, act_weight, full_trial_epoch)
@@ -85,7 +89,15 @@ class ActorLoss(RandomTargetLoss):
         self.hold_steps = int(round(hold_ms / 1000 / dt))
         self.trigger_steps = int(round(trigger_ms / 1000 / dt))
         self.trigger_weight = trigger_weight
+        self.trigger_pos_weight = trigger_pos_weight
         self.n_muscles = n_muscles
+        # The three parts of the most recent loss, for ActorLossTermsLogger
+        self.last_terms = {}
+
+    def trigger_loss(self, trigger, label):
+        """MSE between Trigger and its label, with the label-1 bins up-weighted"""
+        weight = 1.0 + (self.trigger_pos_weight - 1.0) * label
+        return (weight * (trigger - label) ** 2).mean()
 
     def trigger_label(self, fingertip, target, valid_on):
         """Compute the correct Trigger trace from the path the hand actually took
@@ -128,7 +140,12 @@ class ActorLoss(RandomTargetLoss):
             muscles, torch.zeros_like(muscles)
         )
         label = self.trigger_label(pred, target, valid_on)
-        trigger_loss = self.trigger_weight * self.action_loss(trigger, label)
+        trigger_loss = self.trigger_weight * self.trigger_loss(trigger, label)
+        self.last_terms = {
+            "position": torch.as_tensor(pos_loss).detach(),
+            "effort": act_loss.detach(),
+            "trigger": trigger_loss.detach(),
+        }
         return pos_loss + act_loss + trigger_loss
 
 
