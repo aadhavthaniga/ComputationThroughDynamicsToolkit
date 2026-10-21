@@ -9,7 +9,11 @@ from ctd.task_modeling.task_env.task_env import DecoupledEnvironment
 TASKS = {
     "SingleRecall": (1, 1),
     "ForwardRecall": (2, 3),
+    "BackwardRecall": (2, 3),
 }
+
+# Tasks that release the targets last-in-first-out instead of in presentation order
+LIFO_TASKS = {"BackwardRecall"}
 
 # Trial timings (ms). Ranges are inclusive.
 FIXATION_MS = 200
@@ -29,9 +33,12 @@ class StackTask(DecoupledEnvironment):
     Sequence-memory task for the "Stack" region of a two-region model.
 
     1 to 3 targets (points on the unit circle) are shown one at a time.
-    After a delay, Go turns on and the output switches to the first target.
-    Each Trigger pulse advances the output to the next target in presentation
-    order; the trigger after the last target sets the output to zero.
+    After a delay, Go turns on and the output switches to the first target to
+    be released. Each Trigger pulse advances the output to the next one; the
+    trigger after the last target sets the output to zero. ForwardRecall
+    releases the targets in presentation order (first-in-first-out),
+    BackwardRecall in reverse (last-in-first-out). Both draw their trials
+    identically, so with the same seed only the output order differs.
 
     Inputs:
         ItemX, ItemY: the target currently being shown (zero otherwise)
@@ -52,7 +59,8 @@ class StackTask(DecoupledEnvironment):
     ):
         """
         Args:
-            task_list: Tasks to include ("SingleRecall", "ForwardRecall")
+            task_list: Tasks to include ("SingleRecall", "ForwardRecall",
+                "BackwardRecall")
             n_timesteps: Number of bins per trial (shorter trials are zero-padded)
             noise: Std of the Gaussian noise added to the inputs
             bin_ms: Bin size in ms
@@ -164,11 +172,15 @@ class StackTask(DecoupledEnvironment):
         for on in trig_on:
             inputs[on : on + b(TRIGGER_MS), 3] = 1
 
-        # Target i is output from Go (i=0) or trigger i-1 until trigger i.
+        # The i-th target released (presentation index release_order[i]) is
+        # output from Go (i=0) or trigger i-1 until trigger i.
         # The last trigger leaves the output at zero.
+        release_order = list(range(n_items))
+        if task_name in LIFO_TASKS:
+            release_order.reverse()
         switch = [go, *trig_on]
-        for i in range(n_items):
-            outputs[switch[i] : switch[i + 1], 0:2] = targets[i]
+        for i, item in enumerate(release_order):
+            outputs[switch[i] : switch[i + 1], 0:2] = targets[item]
             outputs[switch[i] : switch[i + 1], 2] = 1
 
         inputs_noise = inputs + self.noise * np.random.randn(*inputs.shape)
@@ -176,6 +188,7 @@ class StackTask(DecoupledEnvironment):
             "task_name": task_name,
             "n_items": n_items,
             "angles": angles,
+            "release_order": release_order,
             "item_on": item_on,
             "go": go,
             "trigger_on": trig_on.tolist(),
