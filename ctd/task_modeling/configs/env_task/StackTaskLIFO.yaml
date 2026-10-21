@@ -1,0 +1,9 @@
+_target_: ctd.task_modeling.task_env.stack_task.StackTask
+dataset_name: StackTaskLIFO
+task_list:
+  - SingleRecall
+  - BackwardRecall
+
+n_timesteps: 300
+noise: 0.1
+bin_ms: 20
