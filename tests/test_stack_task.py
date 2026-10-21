@@ -133,6 +133,54 @@ def test_stack_loss_mask(env, data, trials):
         assert loss_with_error_at([kept]) > 0, kept
 
 
+@pytest.fixture(scope="module")
+def lifo_data():
+    """Same seed as `data`, with BackwardRecall in place of ForwardRecall"""
+    lifo_env = StackTask(
+        task_list=["SingleRecall", "BackwardRecall"], dataset_name="StackTaskLIFO"
+    )
+    lifo_env.set_seed(0)
+    return lifo_env.generate_dataset(N_SAMPLES)
+
+
+def test_backward_recall_outputs_targets_in_reverse_order(lifo_data):
+    data, extra_dict = lifo_data
+    n_backward = 0
+    for k, info in enumerate(extra_dict["trial_info"]):
+        true_inputs = data["true_inputs"][k]
+        go, item_on, trig_on = read_events(true_inputs)
+        backward = info["task_name"] == "BackwardRecall"
+        order = list(range(len(item_on)))
+        if backward:
+            order.reverse()
+            n_backward += 1
+        assert info["release_order"] == order
+        switch = [go, *trig_on]
+        for i, item in enumerate(order):
+            shown = true_inputs[item_on[item], 0:2]
+            segment = data["targets"][k, switch[i] : switch[i + 1]]
+            assert np.allclose(segment, [*shown, 1])
+    assert n_backward == N_SAMPLES
+
+
+def test_forward_recall_release_order_is_presentation_order(env):
+    env.set_seed(1)
+    for task_name in ("SingleRecall", "ForwardRecall"):
+        for _ in range(20):
+            info = env.generate_trial(task_name)[3]
+            assert info["release_order"] == list(range(info["n_items"]))
+
+
+def test_backward_and_forward_recall_draw_identical_trials(data, lifo_data):
+    lifo, _ = lifo_data
+    for key in ("inputs", "true_inputs", "extra", "conds", "ics"):
+        assert np.array_equal(data[key], lifo[key]), key
+    # Only the multi-item targets differ: same SingleRecall half, reversed rest
+    single, multi = slice(0, N_SAMPLES), slice(N_SAMPLES, None)
+    assert np.array_equal(data["targets"][single], lifo["targets"][single])
+    assert not np.array_equal(data["targets"][multi], lifo["targets"][multi])
+
+
 def save_examples(path):
     """Saves one example trial of each task: inputs on top, target outputs below"""
     import matplotlib
