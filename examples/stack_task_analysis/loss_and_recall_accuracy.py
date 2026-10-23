@@ -1,10 +1,22 @@
-"""Loss curves and recall accuracy of the trained StackTask model.
+"""Loss curves and recall accuracy of a trained StackTask model.
 
 Plots train/valid loss vs epoch and network output vs target for one trial of
 each type, and prints the angular error of the output during each hold period.
-Run from anywhere: python examples/stack_task_analysis/loss_and_recall_accuracy.py
+"item" in the tables is the output position: the order in which targets are
+released, which for BackwardRecall is the reverse of the order they were shown.
+Per-target errors are also saved as recall_errors<label>.csv in the run folder.
+
+Run from anywhere. With no options it analyses the FIFO run:
+    python examples/stack_task_analysis/loss_and_recall_accuracy.py
+LIFO run, final weights, then the epoch-195 checkpoint:
+    python examples/stack_task_analysis/loss_and_recall_accuracy.py \\
+        --run-tag 20261021_StackTaskLIFO --tasks SingleRecall BackwardRecall
+    python examples/stack_task_analysis/loss_and_recall_accuracy.py \\
+        --run-tag 20261021_StackTaskLIFO --tasks SingleRecall BackwardRecall \\
+        --checkpoint lightning_logs/epoch=194-step=9750.ckpt
 """
 
+import argparse
 import pickle
 from pathlib import Path
 
@@ -16,17 +28,33 @@ import torch
 
 matplotlib.use("Agg")
 
-ROOT = Path(__file__).resolve().parents[2]
-RUN_TAG = "20261007_StackTask_test"
-RUN = ROOT / "content" / "runs" / "task-trained" / RUN_TAG
-MODEL = (
-    ROOT
-    / "content"
-    / "trained_models"
-    / "task-trained"
-    / RUN_TAG
-    / "max_epochs=200_batch_size=64_seed=0"
+parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+parser.add_argument("--run-tag", default="20261007_StackTask_test")
+parser.add_argument("--run-name", default="max_epochs=200_batch_size=64_seed=0")
+parser.add_argument(
+    "--tasks",
+    nargs=2,
+    default=["SingleRecall", "ForwardRecall"],
+    metavar=("SINGLE", "MULTI"),
+    help="the one-item and the multi-item task names, as in the dataset",
 )
+parser.add_argument(
+    "--checkpoint",
+    help="Lightning checkpoint whose weights replace those in model.pkl; "
+    "relative paths are taken from the run folder",
+)
+parser.add_argument(
+    "--label", help="suffix for the output files (default: from the checkpoint)"
+)
+args = parser.parse_args()
+
+ROOT = Path(__file__).resolve().parents[2]
+RUN_TAG = args.run_tag
+RUN = ROOT / "content" / "runs" / "task-trained" / RUN_TAG
+MODEL = ROOT / "content" / "trained_models" / "task-trained" / RUN_TAG / args.run_name
+SINGLE_TASK, MULTI_TASK = args.tasks
+CKPT = None if args.checkpoint is None else RUN / args.checkpoint
+LABEL = args.label if args.label is not None else (f"_{CKPT.stem}" if CKPT else "")
 BIN_MS, SKIP_BINS, TOL_DEG = 20, 4, 15  # 80 ms = 4 bins
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
 LABELS = ["TargetX", "TargetY", "TargetValid"]
@@ -65,7 +93,7 @@ ax.plot(
 ax.set_yscale("log")
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Loss (log scale)")
-ax.set_title("StackTask planner: loss over 200 epochs")
+ax.set_title(f"{RUN_TAG}: loss over {va['epoch'].max() + 1} epochs")
 ax.legend(frameon=False)
 ax.spines[["top", "right"]].set_visible(False)
 ax.grid(axis="y", color="#e6e5e0", lw=0.6)
@@ -78,11 +106,20 @@ with open(MODEL / "model.pkl", "rb") as f:
     wrapper = pickle.load(f)
 with open(MODEL / "datamodule_train.pkl", "rb") as f:
     dm = pickle.load(f)
+if CKPT is not None:
+    ckpt = torch.load(CKPT, map_location="cpu", weights_only=False)
+    wrapper.load_state_dict(ckpt["state_dict"])
+    print(f"weights from {CKPT.name} (epoch {ckpt['epoch'] + 1})")
+else:
+    print("weights from model.pkl (end of training)")
 wrapper = wrapper.to("cpu").eval()
 ics, inputs, targets, inds, conds, extra, _, true_inputs = [
     t.cpu() for t in dm.valid_ds.tensors
 ]
 print("valid trials", inputs.shape, "tasks", dm.data_env.task_list)
+if list(dm.data_env.task_list) != [SINGLE_TASK, MULTI_TASK]:
+    raise ValueError(f"--tasks {SINGLE_TASK} {MULTI_TASK} do not match the dataset")
+torch.manual_seed(0)  # the model's initial hidden state is noisy
 with torch.no_grad():
     out = wrapper.forward(ics, inputs)["controlled"].numpy()
 targets = targets.numpy()
@@ -139,6 +176,7 @@ for i in range(len(out)):
     rows[-1]["pre_valid"] = out[i, : go[i], 2].mean()
     rows[-1]["pre_xy"] = np.abs(out[i, : go[i], :2]).mean()
 df = pd.DataFrame(rows)
+df.to_csv(RUN / f"recall_errors{LABEL}.csv", index=False)
 pd.set_option("display.width", 200)
 pd.set_option("display.float_format", lambda v: f"{v:.3f}")
 print("\nmin hold bins:", df.hold_bins.min())
@@ -184,8 +222,10 @@ conf = 0
 for _, r in bad.iterrows():
     i = int(r.trial)
     segs = segments(targets[i, : end[i]])
-    a, b = segs[int(r.item) - 1]
-    others = [targets[i, s[0], :2] for j, s in enumerate(segs) if j != int(r.item) - 1]
+    a, b = segs[int(r["item"]) - 1]
+    others = [
+        targets[i, s[0], :2] for j, s in enumerate(segs) if j != int(r["item"]) - 1
+    ]
     if (
         others
         and min(ang_err(out[i, a + SKIP_BINS : b], t).mean() for t in others) <= TOL_DEG
@@ -195,7 +235,7 @@ print("bad targets that match a different item of the same trial:", conf)
 
 # ---------- 2. output vs target for three validation trials ----------
 n_items = df.groupby("trial").n_items.first()
-picks = [("SingleRecall", 1), ("ForwardRecall", 2), ("ForwardRecall", 3)]
+picks = [(SINGLE_TASK, 1), (MULTI_TASK, 2), (MULTI_TASK, 3)]
 fig, axes = plt.subplots(3, 1, figsize=(9, 9))
 for ax, (tname, n) in zip(axes, picks):
     cand = [
@@ -231,7 +271,7 @@ axes[0].legend(
     title_fontsize=8,
 )
 fig.tight_layout()
-fig.savefig(RUN / "planner_outputs_vs_targets.png", dpi=150)
+fig.savefig(RUN / f"planner_outputs_vs_targets{LABEL}.png", dpi=150)
 plt.close(fig)
 print("\nsaved figures in", RUN)
 
