@@ -29,9 +29,12 @@ class ActorTask(RandomTarget):
         joint_margin_deg: Goals must stay this far inside the joint limits.
         reach_radius: Distance to the goal (m) that counts as arrived.
         hold_ms: How long the hand must stay arrived before Trigger.
-        trigger_ms: Length of the Trigger pulse.
+        trigger_ms: How long the Trigger label is 1.
         trigger_weight: Weight of the Trigger loss.
-        trigger_pos_weight: Weight of the bins where the Trigger label is 1.
+        trigger_pos_weight: Weight of the bins where the Trigger label is 1,
+            or "auto" to balance them against the other bins.
+        trigger_shape: "pulse" or "step_decay" (see :class:`ActorLoss`).
+        decay_ms: Length of the fall to 0 in "step_decay" mode.
         full_trial_epoch: Epochs before the full trial is in the position loss.
         *args, **kwargs: Passed as-is to :class:`RandomTarget`.
     """
@@ -49,6 +52,8 @@ class ActorTask(RandomTarget):
         trigger_ms=40,
         trigger_weight=1.0,
         trigger_pos_weight=74.0,
+        trigger_shape="pulse",
+        decay_ms=40,
         full_trial_epoch=200,
         **kwargs,
     ):
@@ -88,6 +93,8 @@ class ActorTask(RandomTarget):
             trigger_ms=trigger_ms,
             trigger_weight=trigger_weight,
             trigger_pos_weight=trigger_pos_weight,
+            trigger_shape=trigger_shape,
+            decay_ms=decay_ms,
             dt=self.dt,
             n_muscles=self.n_muscles,
         )

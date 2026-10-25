@@ -18,6 +18,8 @@ context_input_noise: 0.04
 # ActorLoss
 reach_radius: 0.02  # m
 hold_ms: 100
+trigger_shape: "pulse"  # or "step_decay"
 trigger_ms: 40
+decay_ms: 40  # step_decay only: fall from 1 to 0 after trigger_ms
 trigger_weight: 1.0
 full_trial_epoch: 200

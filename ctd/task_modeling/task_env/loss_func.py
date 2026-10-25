@@ -64,7 +64,9 @@ class ActorLoss(RandomTargetLoss):
         hold_ms: float = 100,
         trigger_ms: float = 40,
         trigger_weight: float = 1.0,
-        trigger_pos_weight: float = 74.0,
+        trigger_pos_weight=74.0,
+        trigger_shape: str = "pulse",
+        decay_ms: float = 40,
         dt: float = 0.01,
         n_muscles: int = 6,
     ):
@@ -77,11 +79,17 @@ class ActorLoss(RandomTargetLoss):
             before the full trial is included in the position loss
             reach_radius (float): Distance to the goal (m) that counts as arrived
             hold_ms (float): How long the hand must stay arrived before Trigger
-            trigger_ms (float): Length of the Trigger pulse
+            trigger_ms (float): How long the Trigger label is 1
             trigger_weight (float): The weight to apply to the Trigger loss
-            trigger_pos_weight (float): Weight of the bins where the Trigger
-            label is 1; all other bins have weight 1. The default makes the 4
-            pulse bins count as much in total as the other 296 bins of a 3 s trial
+            trigger_pos_weight (float or "auto"): Weight of the bins where the
+            Trigger label is 1 (bins with a label between 0 and 1 get a weight in
+            between); bins with label 0 have weight 1. The default makes the 4
+            pulse bins count as much in total as the other 296 bins of a 3 s
+            trial. "auto" computes that balance from the label shape and the
+            trial length (see labeled_weight)
+            trigger_shape (str): "pulse": the label is 1 for trigger_ms.
+            "step_decay": 1 for trigger_ms, then falls linearly to 0 over decay_ms
+            decay_ms (float): Length of the fall in "step_decay" mode
             dt (float): Timestep in seconds
             n_muscles (int): Number of muscle outputs; Trigger is the next output"""
         super().__init__(position_loss, pos_weight, act_weight, full_trial_epoch)
@@ -90,21 +98,50 @@ class ActorLoss(RandomTargetLoss):
         self.trigger_steps = int(round(trigger_ms / 1000 / dt))
         self.trigger_weight = trigger_weight
         self.trigger_pos_weight = trigger_pos_weight
+        if trigger_shape not in ("pulse", "step_decay"):
+            raise ValueError(f"Unknown trigger_shape: {trigger_shape}")
+        self.trigger_shape = trigger_shape
+        self.decay_steps = int(round(decay_ms / 1000 / dt))
         self.n_muscles = n_muscles
         # The three parts of the most recent loss, for ActorLossTermsLogger
         self.last_terms = {}
 
+    # Fallbacks for runs pickled before these attributes existed: they were
+    # trained with the pulse label, and before trigger_pos_weight with plain MSE
+    trigger_shape = "pulse"
+    decay_steps = 0
+    trigger_pos_weight = 1.0
+
+    def label_shape(self):
+        """The Trigger label from its onset on, before the cut at the trial end"""
+        on = torch.ones(self.trigger_steps)
+        if self.trigger_shape == "pulse":
+            return on
+        # The k-th decay bin is 1 - k / decay_steps, so the last one is 0
+        return torch.cat([on, torch.linspace(1.0, 0.0, self.decay_steps + 1)[1:]])
+
+    def labeled_weight(self, n_time):
+        """trigger_pos_weight, or for "auto" the weight that makes the labeled
+        bins count as much in total as the other bins of an n_time trial"""
+        if self.trigger_pos_weight != "auto":
+            return self.trigger_pos_weight
+        shape = self.label_shape()
+        n_labeled = int((shape > 0).sum())
+        # Labeled bins weigh 1 + (w - 1) * label; set their sum to n_time - n_labeled
+        return 1.0 + (n_time - 2 * n_labeled) / shape.sum().item()
+
     def trigger_loss(self, trigger, label):
-        """MSE between Trigger and its label, with the label-1 bins up-weighted"""
-        weight = 1.0 + (self.trigger_pos_weight - 1.0) * label
+        """MSE between Trigger and its label, with the labeled bins up-weighted"""
+        weight = 1.0 + (self.labeled_weight(label.shape[-1]) - 1.0) * label
         return (weight * (trigger - label) ** 2).mean()
 
     def trigger_label(self, fingertip, target, valid_on):
         """Compute the correct Trigger trace from the path the hand actually took
 
-        The pulse starts once the hand has stayed within reach_radius of the goal
-        for hold_steps, counting only timesteps from valid_on onward. At most one
-        pulse per trial, and none on catch trials (valid_on = -1).
+        The label (see label_shape) starts once the hand has stayed within
+        reach_radius of the goal for hold_steps, counting only timesteps from
+        valid_on onward, and is cut off at the trial end. At most one label per
+        trial, and none on catch trials (valid_on = -1).
         """
         with torch.no_grad():
             n_trials, n_time, _ = fingertip.shape
@@ -114,9 +151,11 @@ class ActorLoss(RandomTargetLoss):
             # held[b, t]: at the goal for hold_steps in a row, starting at t
             held = at_goal.int().unfold(1, self.hold_steps, 1).min(dim=-1).values > 0
             label = torch.zeros(n_trials, n_time, device=fingertip.device)
+            shape = self.label_shape().to(fingertip.device)
             for trial in torch.nonzero(held.any(dim=1)).flatten():
-                start = held[trial].int().argmax() + self.hold_steps
-                label[trial, start : start + self.trigger_steps] = 1.0
+                start = int(held[trial].int().argmax()) + self.hold_steps
+                end = min(start + len(shape), n_time)
+                label[trial, start:end] = shape[: end - start]
         return label
 
     def __call__(self, loss_dict):
