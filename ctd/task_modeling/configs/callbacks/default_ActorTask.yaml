@@ -1,7 +1,11 @@
 model_checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: "."
-  monitor: valid/loss
+  # Keep a checkpoint every 50 epochs. No monitor: the lowest valid/loss comes
+  # in the first epochs, before the curriculum and Trigger labels apply.
+  monitor: null
+  every_n_epochs: 50
+  save_top_k: -1
   save_last: True
 
 tune_report_callback:
@@ -12,9 +16,10 @@ tune_report_callback:
 loss_terms:
   _target_: ctd.task_modeling.callbacks.callbacks_actor.ActorLossTermsLogger
 
-video_generation_arm:
-  _target_: ctd.task_modeling.callbacks.callbacks_coupled.MotorNetVideoGenerationArm
-  log_every_n_epochs: 50
+# Off: one round takes about 3 min and ~14 GB of memory (3000 frames)
+# video_generation_arm:
+#   _target_: ctd.task_modeling.callbacks.callbacks_coupled.MotorNetVideoGenerationArm
+#   log_every_n_epochs: 50
 
 latent_traj:
   _target_: ctd.task_modeling.callbacks.callbacks_coupled.LatentTrajectoryPlot
