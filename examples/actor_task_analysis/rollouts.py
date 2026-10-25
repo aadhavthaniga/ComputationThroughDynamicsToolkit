@@ -1,30 +1,37 @@
 """What a trained ActorTask model does on its validation trials.
 
 Rolls out the saved model, reports how far and in which direction the hand
-moves and the parts of the loss, and plots fingertip paths and the Trigger
-output against its label.
+moves, the parts of the loss and how well Trigger fires, and plots fingertip
+paths and the Trigger output against its label.
 Run from anywhere: python examples/actor_task_analysis/rollouts.py
+    [--run-tag TAG] [--run-name NAME] [--checkpoint path/to/last.ckpt]
 """
 
+import argparse
 import pickle
 from pathlib import Path
 
-import hydra
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 
 matplotlib.use("Agg")
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--run-tag", default="20261007_ActorTask_small")
+parser.add_argument("--run-name", default="max_epochs=52_batch_size=256_seed=0")
+parser.add_argument(
+    "--checkpoint", help="Lightning checkpoint whose weights replace model.pkl's"
+)
+args = parser.parse_args()
+
 ROOT = Path(__file__).resolve().parents[2]
-RUN_TAG = "20261007_ActorTask_small"
-RUN_NAME = "max_epochs=52_batch_size=256_seed=0"
-MODEL = ROOT / "content" / "trained_models" / "task-trained" / RUN_TAG / RUN_NAME
+RUN_TAG = args.run_tag
+MODEL = ROOT / "content" / "trained_models" / "task-trained" / RUN_TAG / args.run_name
 RUN = ROOT / "content" / "runs" / "task-trained" / RUN_TAG
-ENV_CFG = ROOT / "ctd" / "task_modeling" / "configs" / "env_task" / "ActorTask.yaml"
 N_PLOT = 16
+TRIGGER_WINDOW = 10  # bins (100 ms) around label onset that count as on time
 COLORS = ["#2a78d6", "#eb6834"]
 GREY = "#52514e"
 
@@ -33,9 +40,14 @@ with open(MODEL / "model.pkl", "rb") as f:
 with open(MODEL / "datamodule_train.pkl", "rb") as f:
     datamodule = pickle.load(f)
 
-# model.pkl is saved holding the shorter simulation environment, so rebuild the
-# training environment (and the current loss settings) from the config
-env = hydra.utils.instantiate(OmegaConf.load(ENV_CFG), _convert_="all")
+if args.checkpoint:
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    wrapper.load_state_dict(ckpt["state_dict"])
+
+# model.pkl is saved holding the shorter simulation environment; the datamodule
+# holds the training environment with the run's own loss settings (runs saved
+# before trigger_shape existed get the pulse label)
+env = datamodule.data_env
 wrapper.set_environment(env)
 loss_func = env.loss_func
 torch.manual_seed(0)
@@ -106,9 +118,37 @@ print(
 )
 print(f"trigger loss, unweighted MSE (trigger_pos_weight = 1): {unweighted:.4f}")
 print(
-    f"trigger loss with trigger_pos_weight = {loss_func.trigger_pos_weight}: "
+    f"trigger loss with trigger_pos_weight = {loss_func.trigger_pos_weight} "
+    f"({loss_func.labeled_weight(env.n_timesteps):.2f}): "
     f"{loss_func.trigger_loss(trigger, label).item():.4f} "
-    f"(never firing would score {never:.4f}, a correct pulse 0)"
+    f"(never firing would score {never:.4f}, a correct label 0)"
+)
+
+# ---------------- trigger ----------------
+fired = trigger > 0.5
+has_label = label.sum(dim=1) > 0
+onset = (label > 0).int().argmax(dim=1)
+first_fire = torch.where(fired.any(dim=1), fired.int().argmax(dim=1), -1)
+on_time = (first_fire >= 0) & ((first_fire - onset).abs() <= TRIGGER_WINDOW)
+inside = label > 0
+shape = f"{loss_func.trigger_shape}, {loss_func.trigger_steps * env.dt * 1000:.0f} ms"
+if loss_func.trigger_shape == "step_decay":
+    shape += f" at 1, then {loss_func.decay_steps * env.dt * 1000:.0f} ms decay"
+print(f"\nTrigger label: {shape}")
+print(
+    f"labeled trials whose Trigger first crosses 0.5 within "
+    f"{TRIGGER_WINDOW * env.dt * 1000:.0f} ms of label onset: "
+    f"{int(on_time[has_label].sum())} of {int(has_label.sum())} "
+    f"({on_time[has_label].float().mean().item():.0%})"
+)
+print(
+    f"mean Trigger inside the label {trigger[inside].mean().item():.4f}, "
+    f"outside {trigger[~inside].mean().item():.4f}"
+)
+catch_fired = fired[torch.as_tensor(catch)].any(dim=1)
+print(
+    f"catch trials where Trigger exceeds 0.5: {int(catch_fired.sum())} of "
+    f"{len(catch_fired)} ({catch_fired.float().mean().item():.0%})"
 )
 
 # ---------------- figure ----------------
@@ -192,5 +232,8 @@ for k, i in enumerate(shown):
         bx.legend(frameon=False, fontsize=8.5, loc="upper right")
 fig.suptitle(f"{RUN_TAG}: what the trained arm does", fontsize=12)
 fig.tight_layout()
-fig.savefig(RUN / "actor_small_rollouts.png", dpi=150, bbox_inches="tight")
-print("\nsaved", RUN / "actor_small_rollouts.png")
+suffix = f"_{Path(args.checkpoint).stem}" if args.checkpoint else ""
+out_png = RUN / f"rollouts_{args.run_name}{suffix}.png"
+out_png.parent.mkdir(parents=True, exist_ok=True)
+fig.savefig(out_png, dpi=150, bbox_inches="tight")
+print("\nsaved", out_png)
