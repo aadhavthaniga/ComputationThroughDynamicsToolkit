@@ -21,6 +21,6 @@ hold_ms: 100
 trigger_shape: "step_decay"  # or "pulse"
 trigger_ms: 300
 decay_ms: 100  # step_decay only: fall from 1 to 0 after trigger_ms
-trigger_weight: 0.0053  # never firing costs as much as a hand that never moves
+trigger_weight: 0.0018  # 0.0053 makes never firing cost as much as a hand that never moves
 trigger_pos_weight: "auto"  # or a number, e.g. 74 = (300 - 4) / 4 for the 40 ms pulse
 full_trial_epoch: 25
