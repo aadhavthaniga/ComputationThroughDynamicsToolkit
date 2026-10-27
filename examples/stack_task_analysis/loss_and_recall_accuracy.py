@@ -14,6 +14,8 @@ LIFO run, final weights, then the epoch-195 checkpoint:
     python examples/stack_task_analysis/loss_and_recall_accuracy.py \\
         --run-tag 20261021_StackTaskLIFO --tasks SingleRecall BackwardRecall \\
         --checkpoint lightning_logs/epoch=194-step=9750.ckpt
+Add --fresh-trials 800 to evaluate on 800 newly generated trials (split
+evenly between the two tasks, seed --fresh-seed) instead of the validation set.
 """
 
 import argparse
@@ -46,6 +48,18 @@ parser.add_argument(
 parser.add_argument(
     "--label", help="suffix for the output files (default: from the checkpoint)"
 )
+parser.add_argument(
+    "--fresh-trials",
+    type=int,
+    metavar="N",
+    help="evaluate on N newly generated trials instead of the validation set",
+)
+parser.add_argument(
+    "--fresh-seed",
+    type=int,
+    default=1,
+    help="seed for --fresh-trials (the training data used seed 0)",
+)
 args = parser.parse_args()
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,6 +69,9 @@ MODEL = ROOT / "content" / "trained_models" / "task-trained" / RUN_TAG / args.ru
 SINGLE_TASK, MULTI_TASK = args.tasks
 CKPT = None if args.checkpoint is None else RUN / args.checkpoint
 LABEL = args.label if args.label is not None else (f"_{CKPT.stem}" if CKPT else "")
+if args.label is None and args.fresh_trials:
+    LABEL += f"_fresh{args.fresh_trials}_seed{args.fresh_seed}"
+SPLIT = "fresh" if args.fresh_trials else "validation"
 BIN_MS, SKIP_BINS, TOL_DEG = 20, 4, 15  # 80 ms = 4 bins
 COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]
 LABELS = ["TargetX", "TargetY", "TargetValid"]
@@ -113,10 +130,21 @@ if CKPT is not None:
 else:
     print("weights from model.pkl (end of training)")
 wrapper = wrapper.to("cpu").eval()
-ics, inputs, targets, inds, conds, extra, _, true_inputs = [
-    t.cpu() for t in dm.valid_ds.tensors
-]
-print("valid trials", inputs.shape, "tasks", dm.data_env.task_list)
+if args.fresh_trials:
+    n_tasks = len(dm.data_env.task_list)
+    if args.fresh_trials % n_tasks:
+        raise ValueError(f"--fresh-trials must be a multiple of {n_tasks}")
+    dm.data_env.set_seed(args.fresh_seed)
+    d, _ = dm.data_env.generate_dataset(args.fresh_trials // n_tasks)
+    ics, inputs, targets, conds, extra, true_inputs = [
+        torch.tensor(d[k], dtype=torch.float32)
+        for k in ["ics", "inputs", "targets", "conds", "extra", "true_inputs"]
+    ]
+else:
+    ics, inputs, targets, inds, conds, extra, _, true_inputs = [
+        t.cpu() for t in dm.valid_ds.tensors
+    ]
+print(f"{SPLIT} trials", inputs.shape, "tasks", dm.data_env.task_list)
 if list(dm.data_env.task_list) != [SINGLE_TASK, MULTI_TASK]:
     raise ValueError(f"--tasks {SINGLE_TASK} {MULTI_TASK} do not match the dataset")
 torch.manual_seed(0)  # the model's initial hidden state is noisy
@@ -127,7 +155,7 @@ true_inputs = true_inputs.numpy()
 task = conds.numpy().astype(int).ravel()
 go = extra[:, 0].numpy().astype(int)
 end = extra[:, 1].numpy().astype(int)
-print("valid MSE over all bins:", ((out - targets) ** 2).mean())
+print(f"{SPLIT} MSE over all bins:", ((out - targets) ** 2).mean())
 
 
 def segments(tgt):
@@ -255,7 +283,7 @@ for ax, (tname, n) in zip(axes, picks):
     worst = df[df.trial == i].err.max()
     ax.set_title(
         f"{tname}, {n} item{'s' if n > 1 else ''} "
-        f"(validation trial {i}; worst hold error {worst:.1f} deg)",
+        f"({SPLIT} trial {i}; worst hold error {worst:.1f} deg)",
         fontsize=11,
     )
     ax.set_ylim(-1.3, 1.3)
@@ -327,4 +355,4 @@ ld = dict(
     extra=extra,
     epoch=199,
 )
-print("StackLoss on these validation trials:", float(wrapper.loss_func(ld)))
+print(f"StackLoss on these {SPLIT} trials:", float(wrapper.loss_func(ld)))
