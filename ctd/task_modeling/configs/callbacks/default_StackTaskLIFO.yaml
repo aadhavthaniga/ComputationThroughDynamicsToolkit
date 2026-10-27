@@ -4,6 +4,13 @@ model_checkpoint:
   monitor: valid/loss
   save_last: True
 
+every_25_epochs_checkpoint:
+  _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  dirpath: "."
+  filename: "every25_{epoch}"
+  every_n_epochs: 25
+  save_top_k: -1
+
 tune_report_callback:
   _target_: ray.tune.integration.pytorch_lightning.TuneReportCallback
   metrics:
