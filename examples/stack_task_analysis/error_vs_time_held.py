@@ -28,13 +28,19 @@ matplotlib.use("Agg")
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = ROOT / "content" / "runs" / "task-trained"
 MODELS = ROOT / "content" / "trained_models" / "task-trained"
-RUN_NAME = "max_epochs=200_batch_size=64_seed=0"
 FIFO_TAG, LIFO_TAG = "20261007_StackTask_test", "20261021_StackTaskLIFO"
+LIFO400_TAG = "20261027_StackTaskLIFO_400ep"
+RUN_NAMES = {
+    FIFO_TAG: "max_epochs=200_batch_size=64_seed=0",
+    LIFO_TAG: "max_epochs=200_batch_size=64_seed=0",
+    LIFO400_TAG: "max_epochs=400_batch_size=64_seed=0",
+}
 # (network label, run tag, errors file)
 FIFO = ("FIFO epoch 200", FIFO_TAG, "recall_errors.csv")
 LIFOS = [
     ("LIFO epoch 200", LIFO_TAG, "recall_errors.csv"),
     ("LIFO epoch 195", LIFO_TAG, "recall_errors_epoch=194-step=9750.csv"),
+    ("LIFO epoch 384", LIFO400_TAG, "recall_errors_epoch=383-step=19200.csv"),
 ]
 BIN_MS, ITEM_BINS = 20, 10  # items are shown for 200 ms
 MEDIAN_BIN_MS, MIN_PER_BIN = 250, 10
@@ -49,7 +55,7 @@ def rising_edges(x):
 
 def trial_events(run_tag):
     """Item onsets, Go and Trigger onsets (bins) of every validation trial."""
-    with open(MODELS / run_tag / RUN_NAME / "datamodule_train.pkl", "rb") as f:
+    with open(MODELS / run_tag / RUN_NAMES[run_tag] / "datamodule_train.pkl", "rb") as f:
         dm = pickle.load(f)
     tensors = [t.cpu().numpy() for t in dm.valid_ds.tensors]
     extra, true_inputs = tensors[5], tensors[7]
@@ -89,7 +95,7 @@ def binned_median(d):
     return np.array([iv.mid for iv in stats.index]), stats["median"].to_numpy()
 
 
-events = {tag: trial_events(tag) for tag in {FIFO_TAG, LIFO_TAG}}
+events = {tag: trial_events(tag) for tag in RUN_NAMES}
 fifo = load(*FIFO, events[FIFO_TAG])
 lifos = [(lab, load(lab, tag, csv, events[tag])) for lab, tag, csv in LIFOS]
 
@@ -109,7 +115,7 @@ for lab, d in [(FIFO[0], fifo), *lifos]:
     )
 
 # ---------- figure ----------
-fig, axes = plt.subplots(1, len(lifos), figsize=(13, 5), sharey=True)
+fig, axes = plt.subplots(1, len(lifos), figsize=(6.5 * len(lifos), 5), sharey=True)
 for ax, (lab, lifo) in zip(axes, lifos):
     for name, d in [("FIFO", fifo), ("LIFO", lifo)]:
         for k, mk in MARKERS.items():
